@@ -10,6 +10,8 @@ This kit installs the newest JavaScript-based Claude Code npm release on 32-bit 
 - The matching Windows x86 Sharp and libvips packages for image handling
 - A `claude-x86.cmd` launcher with automatic updates disabled
 
+The installer does not run npm. It downloads exact registry archives, verifies their SHA-512 hashes, and extracts them using the confirmed 32-bit Node.js runtime. This avoids npm selecting or launching an incompatible architecture helper on older systems.
+
 Versions `2.1.113` and later are tiny installer packages that fetch Anthropic's 64-bit native executable, so this port must remain pinned to `2.1.112`.
 
 ## Requirements
@@ -31,6 +33,8 @@ The default location is `%LOCALAPPDATA%\ClaudeCode-x86`. To choose another locat
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\Install-ClaudeCode-x86.ps1 -InstallDir "C:\Tools\ClaudeCode-x86" -AddToPath
 ```
+
+Always keep `extract-tgz.js` beside the PowerShell installer. Do not download only `install.cmd` by itself.
 
 ## Limitations
 
