@@ -44,9 +44,13 @@ function safeTarget(root, archiveName) {
 const destination = path.resolve(destinationPath);
 fs.mkdirSync(destination, { recursive: true });
 
-const tar = zlib.gunzipSync(fs.readFileSync(archivePath));
+const compressed = fs.readFileSync(archivePath);
+console.log(`  Decompressing ${(compressed.length / 1048576).toFixed(1)} MB...`);
+const tar = zlib.gunzipSync(compressed);
+console.log(`  Writing ${(tar.length / 1048576).toFixed(1)} MB of archive data...`);
 let offset = 0;
 let extractedFiles = 0;
+let nextProgress = 10;
 
 while (offset + 512 <= tar.length) {
   const header = tar.subarray(offset, offset + 512);
@@ -74,8 +78,12 @@ while (offset + 512 <= tar.length) {
   }
 
   offset = dataStart + Math.ceil(size / 512) * 512;
+  const percent = Math.min(100, Math.floor((offset * 100) / tar.length));
+  if (percent >= nextProgress) {
+    console.log(`  ${percent}% (${extractedFiles} files)`);
+    nextProgress = percent + 10;
+  }
 }
 
 if (extractedFiles === 0) throw new Error("Archive contained no regular files.");
-console.log(`Extracted ${extractedFiles} files to ${destination}`);
-
+console.log(`  100% - extracted ${extractedFiles} files`);
