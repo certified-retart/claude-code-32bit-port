@@ -12,6 +12,8 @@ This kit installs the newest JavaScript-based Claude Code npm release on 32-bit 
 
 The installer does not run npm. It downloads exact registry archives, verifies their SHA-512 hashes, and extracts them using the confirmed 32-bit Node.js runtime. This avoids npm selecting or launching an incompatible architecture helper on older systems.
 
+Installation is shown as seven numbered stages, with download percentages, checksum status, extraction percentages, and cooldown messages. The installer uses Windows' ACPI temperature sensor when the laptop exposes one. At 85 C it pauses until the reported temperature falls to 75 C; if the machine does not expose a usable sensor, it reports that limitation and inserts short conservative pauses between heavy stages.
+
 Versions `2.1.113` and later are tiny installer packages that fetch Anthropic's 64-bit native executable, so this port must remain pinned to `2.1.112`.
 
 ## Requirements
@@ -36,6 +38,14 @@ powershell -ExecutionPolicy Bypass -File .\Install-ClaudeCode-x86.ps1 -InstallDi
 
 Always keep `extract-tgz.js` beside the PowerShell installer. Do not download only `install.cmd` by itself.
 
+The default temperature thresholds can be changed when launching the PowerShell installer:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\Install-ClaudeCode-x86.ps1 -HighTemperatureC 82 -ResumeTemperatureC 72
+```
+
+The resume threshold must be lower than the high-temperature threshold. Temperature monitoring is best-effort because many older PCs do not publish CPU temperature through Windows. It does not require administrator rights.
+
 ## Limitations
 
 - Voice/audio capture is unavailable because Anthropic did not publish a Windows `ia32` audio-capture module.
@@ -49,4 +59,4 @@ Delete `%LOCALAPPDATA%\ClaudeCode-x86`, then remove that directory from your use
 
 ## Security and provenance
 
-The installer verifies the official Node.js archive against Node's published SHA-256 checksum. npm verifies package integrity using registry metadata. Review `Install-ClaudeCode-x86.ps1` before running it if you want to inspect every download and file operation.
+The installer verifies the official Node.js archive against Node's published SHA-256 checksum and verifies every npm registry archive against its pinned SHA-512 integrity value. Review `Install-ClaudeCode-x86.ps1` before running it if you want to inspect every download and file operation.
