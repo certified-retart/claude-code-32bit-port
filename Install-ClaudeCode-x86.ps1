@@ -1,12 +1,17 @@
 [CmdletBinding()]
 param(
     [string]$InstallDir = (Join-Path $env:LOCALAPPDATA "ClaudeCode-x86"),
-    [switch]$AddToPath
+    [switch]$AddToPath,
+    [ValidateRange(60, 100)][int]$HighTemperatureC = 85,
+    [ValidateRange(50, 95)][int]$ResumeTemperatureC = 75
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
+$TotalSteps = 7
+$CurrentStep = 0
+$TemperatureSensorState = "unknown"
 
 $NodeVersion = "22.22.2"
 $NodeArchive = "node-v$NodeVersion-win-x86.zip"
@@ -26,7 +31,12 @@ $SharpSha512 = "40b8c61af01b8f45ff15797c9f559bb50ea2541a5653b24ef78bbf3f63386bc0
 $LibvipsSha512 = "8919194b78f39760546833eec8d5b3e5d093125297e4f81e0357343ad29d0058b469c2d51dc5af7b883b62da249973fa83d561f1d8bc0ea1203ed8eda47a8c30"
 
 function Write-Step([string]$Message) {
-    Write-Host "`n==> $Message" -ForegroundColor Cyan
+    $script:CurrentStep++
+    Write-Host "`n[$script:CurrentStep/$script:TotalSteps] $Message" -ForegroundColor Cyan
+}
+
+function Format-Megabytes([long]$Bytes) {
+    return "{0:N1}" -f ($Bytes / 1MB)
 }
 
 function Invoke-Checked {
@@ -43,7 +53,106 @@ function Invoke-Checked {
 
 function Download-File([string]$Uri, [string]$Destination) {
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-    Invoke-WebRequest -UseBasicParsing -Uri $Uri -OutFile $Destination
+    $request = [Net.HttpWebRequest]::Create($Uri)
+    $request.UserAgent = "ClaudeCode-x86-port-installer"
+    $response = $null
+    $inputStream = $null
+    $outputStream = $null
+
+    try {
+        $response = $request.GetResponse()
+        $totalBytes = [long]$response.ContentLength
+        $inputStream = $response.GetResponseStream()
+        $outputStream = [IO.File]::Open($Destination, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        $buffer = New-Object byte[] 65536
+        $downloaded = [long]0
+        $nextPercent = 0
+        $lastReport = [DateTime]::UtcNow
+
+        while (($read = $inputStream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+            $outputStream.Write($buffer, 0, $read)
+            $downloaded += $read
+
+            if ($totalBytes -gt 0) {
+                $percent = [Math]::Min(100, [Math]::Floor(($downloaded * 100.0) / $totalBytes))
+                if ($percent -ge $nextPercent -or ([DateTime]::UtcNow - $lastReport).TotalSeconds -ge 2) {
+                    Write-Host -NoNewline ("`r  {0,3}%  {1}/{2} MB" -f $percent, (Format-Megabytes $downloaded), (Format-Megabytes $totalBytes))
+                    $nextPercent = [Math]::Min(100, $percent + 5)
+                    $lastReport = [DateTime]::UtcNow
+                }
+            }
+            elseif (([DateTime]::UtcNow - $lastReport).TotalSeconds -ge 2) {
+                Write-Host -NoNewline ("`r  Downloaded {0} MB" -f (Format-Megabytes $downloaded))
+                $lastReport = [DateTime]::UtcNow
+            }
+        }
+
+        if ($totalBytes -gt 0) {
+            Write-Host ("`r  100%  {0}/{1} MB" -f (Format-Megabytes $downloaded), (Format-Megabytes $totalBytes))
+        }
+        else {
+            Write-Host ("`r  Downloaded {0} MB" -f (Format-Megabytes $downloaded))
+        }
+    }
+    finally {
+        if ($outputStream) { $outputStream.Dispose() }
+        if ($inputStream) { $inputStream.Dispose() }
+        if ($response) { $response.Dispose() }
+    }
+}
+
+function Get-CpuTemperatureC {
+    try {
+        $values = @(Get-WmiObject -Namespace "root\wmi" -Class "MSAcpi_ThermalZoneTemperature" -ErrorAction Stop |
+            ForEach-Object { ($_.CurrentTemperature / 10.0) - 273.15 } |
+            Where-Object { $_ -ge 1 -and $_ -le 115 })
+        if ($values.Count -eq 0) { return $null }
+        return [Math]::Round(($values | Measure-Object -Maximum).Maximum, 1)
+    }
+    catch {
+        return $null
+    }
+}
+
+function Protect-Temperature([string]$Activity) {
+    $temperature = Get-CpuTemperatureC
+    if ($null -eq $temperature) {
+        if ($script:TemperatureSensorState -ne "unavailable") {
+            Write-Host "Temperature sensor unavailable; using short conservative pauses between heavy stages." -ForegroundColor Yellow
+            $script:TemperatureSensorState = "unavailable"
+        }
+        Start-Sleep -Seconds 3
+        return
+    }
+
+    if ($script:TemperatureSensorState -ne "available") {
+        Write-Host "Temperature monitoring active (pause at $HighTemperatureC C; resume at $ResumeTemperatureC C)." -ForegroundColor Green
+        $script:TemperatureSensorState = "available"
+    }
+
+    Write-Host "Temperature before ${Activity}: $temperature C"
+    if ($temperature -lt $HighTemperatureC) { return }
+
+    $waitedSeconds = 0
+    Write-Warning "Temperature is $temperature C. Pausing installation to cool down."
+    while ($temperature -gt $ResumeTemperatureC) {
+        Start-Sleep -Seconds 20
+        $waitedSeconds += 20
+        $temperature = Get-CpuTemperatureC
+
+        if ($null -eq $temperature) {
+            Write-Warning "Temperature sensor stopped responding. Waiting 30 more seconds before continuing."
+            Start-Sleep -Seconds 30
+            return
+        }
+
+        Write-Host "  Cooldown: $temperature C after $waitedSeconds seconds"
+        if ($waitedSeconds -ge 600) {
+            throw "The computer stayed above $ResumeTemperatureC C for 10 minutes. Installation stopped safely."
+        }
+    }
+
+    Write-Host "Temperature is back to $temperature C. Continuing." -ForegroundColor Green
 }
 
 function Download-VerifiedPackage(
@@ -52,12 +161,15 @@ function Download-VerifiedPackage(
     [string]$ExpectedSha512,
     [string]$Destination
 ) {
-    Write-Host "Downloading $Name..."
+    Protect-Temperature "downloading $Name"
+    Write-Host "Downloading $Name"
     Download-File $Uri $Destination
+    Write-Host "  Verifying SHA-512..." -NoNewline
     $actual = (Get-FileHash -Algorithm SHA512 -Path $Destination).Hash.ToLowerInvariant()
     if ($actual -ne $ExpectedSha512) {
         throw "$Name checksum mismatch. Expected $ExpectedSha512 but received $actual."
     }
+    Write-Host " OK" -ForegroundColor Green
 }
 
 function Add-UserPath([string]$Directory) {
@@ -82,6 +194,10 @@ if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
     throw "This installer only supports Windows."
 }
 
+if ($ResumeTemperatureC -ge $HighTemperatureC) {
+    throw "ResumeTemperatureC must be lower than HighTemperatureC."
+}
+
 $workDir = Join-Path $env:TEMP ("claude-code-x86-" + [Guid]::NewGuid().ToString("N"))
 $stageDir = Join-Path $workDir "stage"
 $nodeZip = Join-Path $workDir $NodeArchive
@@ -97,15 +213,21 @@ $backupDir = $null
 $installationCommitted = $false
 
 try {
+    Write-Step "Preparing installation"
     New-Item -ItemType Directory -Force -Path $stageDir, $nodeExtract, $runtimeDir | Out-Null
+    Protect-Temperature "installation"
 
     Write-Step "Downloading official 32-bit Node.js $NodeVersion"
     Download-File $NodeUrl $nodeZip
+    Write-Host "Verifying Node.js SHA-256..." -NoNewline
     $actualHash = (Get-FileHash -Algorithm SHA256 -Path $nodeZip).Hash.ToLowerInvariant()
     if ($actualHash -ne $NodeSha256) {
         throw "Node.js checksum mismatch. Expected $NodeSha256 but received $actualHash."
     }
+    Write-Host " OK" -ForegroundColor Green
 
+    Protect-Temperature "expanding Node.js"
+    Write-Host "Expanding Node.js archive..."
     Expand-Archive -Path $nodeZip -DestinationPath $nodeExtract -Force
     $nodeSource = Join-Path $nodeExtract "node-v$NodeVersion-win-x86"
     if (-not (Test-Path (Join-Path $nodeSource "node.exe"))) {
@@ -113,6 +235,7 @@ try {
     }
     Move-Item -Path $nodeSource -Destination (Join-Path $stageDir "node")
 
+    Write-Step "Verifying the 32-bit runtime"
     $nodeExe = Join-Path $stageDir "node\node.exe"
     $detectedArch = (& $nodeExe -p "process.arch").Trim()
     if ($detectedArch -ne "ia32") {
@@ -136,9 +259,17 @@ try {
 
     Write-Step "Extracting packages with 32-bit Node.js"
     New-Item -ItemType Directory -Force -Path $claudeDir, $ripgrepPackageDir, $sharpPackageDir, $libvipsPackageDir | Out-Null
+    Protect-Temperature "extracting Claude Code"
+    Write-Host "Claude Code archive:"
     Invoke-Checked -FilePath $nodeExe -Arguments @($extractor, $claudeArchive, $claudeDir)
+    Protect-Temperature "extracting ripgrep"
+    Write-Host "ripgrep archive:"
     Invoke-Checked -FilePath $nodeExe -Arguments @($extractor, $ripgrepArchive, $ripgrepPackageDir)
+    Protect-Temperature "extracting Sharp"
+    Write-Host "Sharp archive:"
     Invoke-Checked -FilePath $nodeExe -Arguments @($extractor, $sharpArchive, $sharpPackageDir)
+    Protect-Temperature "extracting libvips"
+    Write-Host "libvips archive:"
     Invoke-Checked -FilePath $nodeExe -Arguments @($extractor, $libvipsArchive, $libvipsPackageDir)
 
     $ripgrepSource = Join-Path $ripgrepPackageDir "bin\rg.exe"
@@ -160,12 +291,14 @@ exit /b %errorlevel%
 
     $versionLauncher = Join-Path $stageDir "claude-x86.cmd"
     Write-Step "Running x86 smoke tests"
+    Protect-Temperature "running smoke tests"
     Invoke-Checked -FilePath (Join-Path $ripgrepTarget "rg.exe") -Arguments @("--version")
     Invoke-Checked -FilePath $versionLauncher -Arguments @("--version")
 
+    Write-Step "Installing files"
     if (Test-Path $InstallDir) {
         $backupDir = "$InstallDir.backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
-        Write-Step "Moving the previous installation to $backupDir"
+        Write-Host "Moving the previous installation to $backupDir"
         Move-Item -Path $InstallDir -Destination $backupDir
     }
 
